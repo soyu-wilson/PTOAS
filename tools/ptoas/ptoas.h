@@ -37,6 +37,7 @@ extern llvm::cl::opt<std::string> ptoBackend;
 extern llvm::cl::opt<bool> emitVPTO;
 extern llvm::cl::opt<bool> emitVPTOLLVMDialect;
 extern llvm::cl::opt<std::string> cannOutputVersion;
+extern llvm::cl::opt<bool> emitDeviceObject;
 extern llvm::cl::opt<bool> ptoPrintSeamIR;
 extern llvm::cl::opt<std::string> ptoSeamIRFile;
 extern llvm::cl::opt<VFSIMTSizeFixMode> vptoFixVFSIMTSize;

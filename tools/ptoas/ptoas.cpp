@@ -423,6 +423,11 @@ llvm::cl::opt<std::string> mlir::pto::cannOutputVersion(
         "toolchain-detected one (e.g. 9.0.0-beta.1); mainly for tests"),
     llvm::cl::value_desc("x.y.z[-beta.N]"), llvm::cl::init(""));
 
+llvm::cl::opt<bool> mlir::pto::emitDeviceObject(
+    "emit-device-object",
+    llvm::cl::desc("Write final linked VPTO AICore device object to -o"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),
