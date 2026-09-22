@@ -638,6 +638,11 @@ llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
     llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool> mlir::pto::emitDeviceObject(
+    "emit-device-object",
+    llvm::cl::desc("Write final linked VPTO AICore device object to -o"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),

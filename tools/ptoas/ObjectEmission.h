@@ -134,6 +134,12 @@ LogicalResult emitFatobjLLVM(
     TempFileRegistry &tempFiles, VFSIMTSizeFixMode vfsimtSizeFixMode,
     llvm::raw_ostream &diagOS);
 
+LogicalResult emitDeviceObjectLLVM(
+    llvm::Module *cubeModule, llvm::Module *vectorModule,
+    llvm::StringRef outputPath, const CANNToolchain &toolchain,
+    TempFileRegistry &tempFiles, VFSIMTSizeFixMode vfsimtSizeFixMode,
+    llvm::raw_ostream &diagOS);
+
 LogicalResult mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                  llvm::StringRef outObjPath,
                                  const CANNToolchain &toolchain,
