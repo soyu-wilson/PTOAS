@@ -733,6 +733,10 @@ static LogicalResult emitVPTOLLVMFatobj(
     mlir::pto::PTOASContext &context, llvm::StringRef moduleId,
     llvm::StringRef outputPath);
 
+static LogicalResult emitVPTOLLVMDeviceObject(
+    const mlir::pto::PTOASCompileResult &jobResult,
+    mlir::pto::PTOASContext &context, llvm::StringRef outputPath);
+
 mlir::pto::PTOASContext::PTOASContext(DialectRegistry &registry,
                                       llvm::StringRef outputPath, int argc,
                                       char **argv)
@@ -1115,9 +1119,16 @@ LogicalResult VPTOBackendJob::run(PTOASContext &context) {
   }
 
   std::string moduleId = context.allocModuleId();
-  if (failed(emitVPTOLLVMFatobj(result, context, moduleId,
-                                context.getOutputPath()))) {
-    return failure();
+  if (mlir::pto::emitDeviceObject) {
+    if (failed(emitVPTOLLVMDeviceObject(result, context,
+                                        context.getOutputPath()))) {
+      return failure();
+    }
+  } else {
+    if (failed(emitVPTOLLVMFatobj(result, context, moduleId,
+                                  context.getOutputPath()))) {
+      return failure();
+    }
   }
 
   result.reset();
@@ -1148,6 +1159,78 @@ static LogicalResult emitVPTOLLVMFatobj(
   return success();
 }
 
+static LogicalResult emitVPTOLLVMDeviceObject(
+    const mlir::pto::PTOASCompileResult &jobResult, PTOASContext &context,
+    llvm::StringRef outputPath) {
+  const mlir::pto::CANNToolchain *toolchain =
+      context.getToolchain(llvm::errs());
+  if (!toolchain) {
+    return failure();
+  }
+  if (failed(mlir::pto::emitDeviceObjectLLVM(
+          jobResult.vptoCubeModule.module.get(),
+          jobResult.vptoVectorModule.module.get(), outputPath, *toolchain,
+          context.getTempFiles(), context.getVFSIMTSizeFixMode(),
+          llvm::errs()))) {
+    return failure();
+  }
+  return success();
+}
+
+static LogicalResult appendBackendChildJob(
+    ModuleOp module, ModuleOp child, mlir::pto::PTOBackend defaultBackend,
+    bool cliBackendOverride, PTOASContext &context,
+    SmallVectorImpl<std::string> &fatobjPaths,
+    SmallVectorImpl<std::unique_ptr<BackendChildJob>> &backendJobs) {
+  std::optional<mlir::pto::PTOBackend> childBackend;
+  if (failed(parseDriverBackendAttr(child.getOperation(), childBackend))) {
+    return failure();
+  }
+
+  FailureOr<OwningOpRef<ModuleOp>> jobModuleOr =
+      buildBackendChildCompileUnit(module, child);
+  if (failed(jobModuleOr)) {
+    return failure();
+  }
+  OwningOpRef<ModuleOp> jobModule = std::move(*jobModuleOr);
+  if (llvm::sys::Process::GetEnv("PTOAS_DEBUG_CHILD_UNIT")) {
+    llvm::errs() << "// ----- child compile unit ----- //\n";
+    jobModule->print(llvm::errs());
+    llvm::errs() << "\n";
+  }
+
+  std::string summary = summarizeMixedChildModule(jobModule.get());
+  mlir::pto::PTOBackend effectiveBackend =
+      cliBackendOverride ? defaultBackend
+                         : childBackend.value_or(defaultBackend);
+  if (effectiveBackend == mlir::pto::PTOBackend::VPTO) {
+    backendJobs.push_back(std::make_unique<VPTOBackendChildJob>(
+        std::move(jobModule), std::move(summary), context.allocModuleId(),
+        fatobjPaths));
+  } else {
+    backendJobs.push_back(std::make_unique<EmitCBackendChildJob>(
+        std::move(jobModule), std::move(summary), fatobjPaths));
+  }
+  return success();
+}
+
+// PTOAS driver job topology: one .pto input feeds EmitC and VPTO jobs, plus
+// per-child backend jobs in mixed assemblies; child jobs produce fatobj pieces
+// that the fatobj link job merges into the final artifact.
+//
+// +----------------------------------------------------------+
+// |                        .pto                              |
+// +----------------------------------------------------------+
+// +-------------+ +------------+ +------------+ +------------+
+// | EmitC job   | | VPTO job   | | EmitC      | | VPTO       |
+// |             | |            | | child job  | | child job  |
+// |             | |            | +------------+ +------------+
+// |             | |            | +---------------------------+
+// |             | |            | | Fatobj link job           |
+// +-------------+ +------------+ +---------------------------+
+// +-------------+ +------------------------------------------+
+// | C++ source  | |                fatobj                    |
+// +-------------+ +------------------------------------------+
 static LogicalResult collectChildJobs(
     ModuleOp module, mlir::pto::PTOBackend defaultBackend,
     bool cliBackendOverride,
@@ -1155,34 +1238,11 @@ static LogicalResult collectChildJobs(
     SmallVectorImpl<std::unique_ptr<BackendChildJob>> &backendJobs) {
   SmallVector<ModuleOp, mlir::pto::kValue4> children(module.getOps<ModuleOp>());
   for (ModuleOp child : children) {
-    std::optional<mlir::pto::PTOBackend> childBackend;
-    if (failed(parseDriverBackendAttr(child.getOperation(), childBackend))) {
+    if (failed(appendBackendChildJob(module, child, defaultBackend,
+                                     cliBackendOverride, context, fatobjPaths,
+                                     backendJobs))) {
       return failure();
     }
-
-    FailureOr<OwningOpRef<ModuleOp>> jobModuleOr =
-        buildBackendChildCompileUnit(module, child);
-    if (failed(jobModuleOr)) {
-      return failure();
-    }
-    OwningOpRef<ModuleOp> jobModule = std::move(*jobModuleOr);
-    if (llvm::sys::Process::GetEnv("PTOAS_DEBUG_CHILD_UNIT")) {
-      llvm::errs() << "// ----- child compile unit ----- //\n";
-      jobModule->print(llvm::errs());
-      llvm::errs() << "\n";
-    }
-    std::string summary = summarizeMixedChildModule(jobModule.get());
-    mlir::pto::PTOBackend effectiveBackend =
-        cliBackendOverride ? defaultBackend
-                           : childBackend.value_or(defaultBackend);
-    if (effectiveBackend == mlir::pto::PTOBackend::VPTO) {
-      backendJobs.push_back(std::make_unique<VPTOBackendChildJob>(
-          std::move(jobModule), std::move(summary), context.allocModuleId(),
-          fatobjPaths));
-    } else {
-      backendJobs.push_back(std::make_unique<EmitCBackendChildJob>(
-          std::move(jobModule), std::move(summary), fatobjPaths));
-}
   }
   return success();
 }
@@ -1271,11 +1331,27 @@ static LogicalResult buildBackendInfo(ModuleOp module, bool cliBackendSpecified,
   }
 
   if (backendInfo.singleBackend) {
+    if (mlir::pto::emitDeviceObject &&
+        *backendInfo.singleBackend != mlir::pto::PTOBackend::VPTO) {
+      llvm::errs() << "Error: --emit-device-object requires the VPTO backend.\n";
+      return failure();
+    }
+    if (mlir::pto::emitDeviceObject && isUserVisibleIROutputRequested()) {
+      llvm::errs() << "Error: --emit-device-object cannot be combined with "
+                      "debug IR output flags.\n";
+      return failure();
+    }
     backendInfo.requiresToolchain =
         *backendInfo.singleBackend == mlir::pto::PTOBackend::VPTO &&
         !mlir::pto::emitMlirIR && !mlir::pto::emitVPTO &&
         !mlir::pto::emitVPTOLLVMDialect;
     return success();
+  }
+
+  if (mlir::pto::emitDeviceObject) {
+    llvm::errs() << "Error: --emit-device-object does not support mixed "
+                    "pto.backend modules.\n";
+    return failure();
   }
 
   if (mlir::pto::emitMlirIR || mlir::pto::emitVPTO ||

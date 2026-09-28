@@ -300,6 +300,11 @@ static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                llvm::StringRef ldLldPath,
                                llvm::StringRef stderrPath,
                                llvm::raw_ostream &diagOS);
+static bool linkDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
+                              llvm::StringRef outObjPath,
+                              llvm::StringRef ldLldPath,
+                              llvm::StringRef stderrPath,
+                              llvm::raw_ostream &diagOS);
 
 static llvm::StringRef
 getTargetCPU(mlir::pto::ObjectEmissionDeviceTarget target) {
@@ -423,6 +428,25 @@ public:
     }
     return ::mergeDeviceObjects(deviceObjPaths, mergedDeviceObjPath,
                                 toolchain.ldLldPath, stderrPath, diagOS);
+  }
+
+  bool linkDeviceObjects(const mlir::pto::CANNToolchain &toolchain,
+                         llvm::StringRef outputPath,
+                         llvm::raw_ostream &diagOS) {
+    llvm::SmallVector<std::string, mlir::pto::kValue2> deviceObjPaths;
+    if (!cubeObjPath.empty()) {
+      deviceObjPaths.push_back(cubeObjPath);
+    }
+    if (!vectorObjPath.empty()) {
+      deviceObjPaths.push_back(vectorObjPath);
+    }
+    if (deviceObjPaths.empty()) {
+      diagOS << "Error: VPTO device object emission requires at least one "
+                "device module.\n";
+      return false;
+    }
+    return ::linkDeviceObjects(deviceObjPaths, outputPath, toolchain.ldLldPath,
+                               stderrPath, diagOS);
   }
 
   bool compileHostStub(const mlir::pto::CANNToolchain &toolchain,
@@ -807,6 +831,32 @@ static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                               "device object merge");
 }
 
+static bool linkDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
+                              llvm::StringRef outObjPath,
+                              llvm::StringRef ldLldPath,
+                              llvm::StringRef stderrPath,
+                              llvm::raw_ostream &diagOS) {
+  if (deviceObjPaths.empty()) {
+    return false;
+  }
+
+  llvm::SmallVector<std::string, mlir::pto::kValue16> args = {
+      ldLldPath.str(),
+      "-m",
+      "aicorelinux",
+      "-Ttext",
+      "0",
+  };
+  for (const std::string &path : deviceObjPaths) {
+    args.push_back(path);
+  }
+  args.push_back("-o");
+  args.push_back(outObjPath.str());
+  args.push_back("--allow-multiple-definition");
+  return runCommandWithStderr(ldLldPath, args, stderrPath, diagOS,
+                              "device object link");
+}
+
 static bool linkFatobjFiles(llvm::ArrayRef<std::string> fatobjPaths,
                             llvm::StringRef outObjPath,
                             const mlir::pto::CANNToolchain &toolchain,
@@ -1146,6 +1196,34 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVM(
   constexpr llvm::StringLiteral targetCPU = "dav-c310";
   if (!artifacts.compileHostStubToFatobj(toolchain, moduleId, targetCPU,
                                          outputPath, diagOS)) {
+    return failure();
+  }
+  return success();
+}
+
+mlir::LogicalResult mlir::pto::emitDeviceObjectLLVM(
+    llvm::Module *cubeModule, llvm::Module *vectorModule,
+    llvm::StringRef outputPath, const CANNToolchain &toolchain,
+    TempFileRegistry &tempFiles, VFSIMTSizeFixMode vfsimtSizeFixMode,
+    llvm::raw_ostream &diagOS) {
+  if (!cubeModule && !vectorModule) {
+    diagOS << "Error: VPTO device object emission requires at least one LLVM "
+              "module.\n";
+    return failure();
+  }
+
+  VPTOFatobjArtifacts artifacts(tempFiles);
+  if (!artifacts.initCommandLogs(diagOS)) {
+    return failure();
+  }
+  if (!artifacts.emitCubeObject(cubeModule, toolchain, diagOS)) {
+    return failure();
+  }
+  if (!artifacts.emitVectorObject(vectorModule, toolchain,
+                                  vfsimtSizeFixMode, diagOS)) {
+    return failure();
+  }
+  if (!artifacts.linkDeviceObjects(toolchain, outputPath, diagOS)) {
     return failure();
   }
   return success();
