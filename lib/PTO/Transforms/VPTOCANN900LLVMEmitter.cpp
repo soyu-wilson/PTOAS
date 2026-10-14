@@ -16,6 +16,8 @@
 #include "PTO/IR/PTOSyncUtils.h"
 #include "PTO/Transforms/Passes.h"
 
+#include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
@@ -62,10 +64,167 @@ namespace {
 
 constexpr llvm::StringLiteral kVectorSuffix = "_mix_aiv";
 constexpr llvm::StringLiteral kCubeSuffix = "_mix_aic";
+constexpr llvm::StringLiteral kPreserveExternalCallMemRefsAttr =
+    "pto.preserve_external_call_memrefs";
 
 static std::string getElementTypeFragment(Type type);
 static Type getElementTypeFromVectorLike(Type type);
 static std::optional<int64_t> getElementCountFromVectorLike(Type type);
+
+static Type convertExternalMemRefAddressSpace(Type type) {
+  auto memrefType = dyn_cast<MemRefType>(type);
+  if (!memrefType)
+    return type;
+  auto addressSpace =
+      dyn_cast_or_null<pto::AddressSpaceAttr>(memrefType.getMemorySpace());
+  if (!addressSpace)
+    return type;
+  auto integerSpace = IntegerAttr::get(
+      IntegerType::get(type.getContext(), 64),
+      static_cast<int64_t>(addressSpace.getAddressSpace()));
+  return MemRefType::Builder(memrefType).setMemorySpace(integerSpace);
+}
+
+class PrepareExternalCallMemRefABIPass final
+    : public PassWrapper<PrepareExternalCallMemRefABIPass,
+                         OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      PrepareExternalCallMemRefABIPass)
+
+  StringRef getArgument() const final {
+    return "pto-prepare-external-call-memref-abi-cann900";
+  }
+
+  StringRef getDescription() const final {
+    return "Prepare preserved external-call memrefs for standard LLVM ABI lowering";
+  }
+
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    if (!module->hasAttr(kPreserveExternalCallMemRefsAttr))
+      return;
+
+    module.walk([&](Operation *op) {
+      if (auto func = dyn_cast<func::FuncOp>(op)) {
+        FunctionType oldType = func.getFunctionType();
+        SmallVector<Type> inputs;
+        SmallVector<Type> results;
+        inputs.reserve(oldType.getNumInputs());
+        results.reserve(oldType.getNumResults());
+        for (Type type : oldType.getInputs())
+          inputs.push_back(convertExternalMemRefAddressSpace(type));
+        for (Type type : oldType.getResults())
+          results.push_back(convertExternalMemRefAddressSpace(type));
+        func.setFunctionType(
+            FunctionType::get(module.getContext(), inputs, results));
+      }
+
+      for (Region &region : op->getRegions()) {
+        for (Block &block : region) {
+          for (BlockArgument argument : block.getArguments())
+            argument.setType(
+                convertExternalMemRefAddressSpace(argument.getType()));
+        }
+      }
+      for (OpResult result : op->getResults())
+        result.setType(convertExternalMemRefAddressSpace(result.getType()));
+    });
+
+    LowerToLLVMOptions options(module.getContext());
+    LLVMTypeConverter llvmTypeConverter(module.getContext(), options);
+    SmallVector<UnrealizedConversionCastOp> pointerBridges;
+    module.walk([&](UnrealizedConversionCastOp cast) {
+      if (cast->getNumOperands() == 1 && cast->getNumResults() == 1 &&
+          isa<LLVM::LLVMPointerType>(cast.getOperand(0).getType()) &&
+          isa<MemRefType>(cast.getResult(0).getType()))
+        pointerBridges.push_back(cast);
+    });
+
+    for (UnrealizedConversionCastOp cast : pointerBridges) {
+      auto memrefType = mlir::cast<MemRefType>(cast.getResult(0).getType());
+      if (!memrefType.hasStaticShape()) {
+        SmallVector<int64_t> carrierStrides;
+        int64_t carrierOffset = 0;
+        if (memrefType.getRank() != 1 ||
+            failed(getStridesAndOffset(memrefType, carrierStrides,
+                                       carrierOffset)) ||
+            carrierStrides.size() != 1 || carrierStrides.front() != 1 ||
+            carrierOffset != 0) {
+          cast.emitError(
+              "dynamic external-call pointer bridge requires a rank-1 "
+              "identity-layout carrier memref");
+          signalPassFailure();
+          return;
+        }
+
+        for (Operation *user : cast.getResult(0).getUsers()) {
+          auto metadata = dyn_cast<memref::ExtractStridedMetadataOp>(user);
+          if (!metadata || metadata.getSource() != cast.getResult(0)) {
+            cast.emitError(
+                "dynamic external-call pointer bridge must feed only "
+                "memref.extract_strided_metadata");
+            signalPassFailure();
+            return;
+          }
+          for (OpResult result : metadata->getResults().drop_front()) {
+            if (!result.use_empty()) {
+              metadata.emitError(
+                  "opaque external-call carrier metadata must be unused");
+              signalPassFailure();
+              return;
+            }
+          }
+          Value baseBuffer = metadata->getResult(0);
+          for (Operation *baseUser : baseBuffer.getUsers()) {
+            auto view = dyn_cast<memref::ReinterpretCastOp>(baseUser);
+            if (!view || view.getSource() != baseBuffer) {
+              metadata.emitError(
+                  "opaque external-call carrier base must feed only "
+                  "memref.reinterpret_cast views");
+              signalPassFailure();
+              return;
+            }
+          }
+        }
+
+        OpBuilder builder(cast);
+        Type descriptorType = llvmTypeConverter.convertType(memrefType);
+        if (!descriptorType) {
+          cast.emitError("failed to convert dynamic carrier memref type");
+          signalPassFailure();
+          return;
+        }
+        MemRefDescriptor descriptor =
+            MemRefDescriptor::undef(builder, cast.getLoc(), descriptorType);
+        descriptor.setAllocatedPtr(builder, cast.getLoc(), cast.getOperand(0));
+        descriptor.setAlignedPtr(builder, cast.getLoc(), cast.getOperand(0));
+        descriptor.setConstantOffset(builder, cast.getLoc(), 0);
+        descriptor.setConstantSize(builder, cast.getLoc(), 0, 0);
+        descriptor.setConstantStride(builder, cast.getLoc(), 0, 1);
+        cast->setOperand(0, descriptor);
+        continue;
+      }
+
+      SmallVector<int64_t> strides;
+      int64_t offset = 0;
+      if (failed(getStridesAndOffset(memrefType, strides, offset)) ||
+          llvm::is_contained(strides, ShapedType::kDynamic) ||
+          offset == ShapedType::kDynamic) {
+        cast.emitError(
+            "external-call pointer bridge requires a static strided memref");
+        signalPassFailure();
+        return;
+      }
+
+      OpBuilder builder(cast);
+      MemRefDescriptor descriptor = MemRefDescriptor::fromStaticShape(
+          builder, cast.getLoc(), llvmTypeConverter, memrefType,
+          cast.getOperand(0));
+      cast->setOperand(0, descriptor);
+    }
+  }
+};
 
 static Type getLowPrecisionLLVMType(Type type, MLIRContext *context) {
   if (pto::isPTOHiFloat8Type(type)) {
@@ -10321,6 +10480,13 @@ public:
       return failure();
 
     Value input = adaptor.getOperands().front();
+    if (isa<pto::PtrType>(op.getOperand(0).getType()) &&
+        isa<MemRefType>(op.getResult(0).getType()) &&
+        isa<LLVM::LLVMPointerType>(input.getType())) {
+      rewriter.replaceOpWithNewOp<UnrealizedConversionCastOp>(
+          op, op.getResult(0).getType(), input);
+      return success();
+    }
     if (input.getType() != convertedResultType)
       return failure();
 
@@ -11869,6 +12035,8 @@ static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
   kernelModulePM.addPass(std::make_unique<PrepareVPTOLLVMLoweringPass>());
   kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>());
   kernelModulePM.addPass(std::make_unique<LowerVPTOTypesPass>());
+  kernelModulePM.addPass(
+      std::make_unique<PrepareExternalCallMemRefABIPass>());
   kernelModulePM.addPass(
       std::make_unique<NormalizeFuncSignaturesForLLVMLoweringPass>());
   kernelModulePM.addPass(arith::createArithExpandOpsPass());

@@ -37,6 +37,15 @@ using namespace mlir;
 
 namespace {
 
+static constexpr StringLiteral kPreserveExternalCallMemRefsAttr =
+    "pto.preserve_external_call_memrefs";
+
+static bool isExternalCallMemRefBridge(UnrealizedConversionCastOp op) {
+  return op->getNumOperands() == 1 && op->getNumResults() == 1 &&
+         isa<pto::PtrType>(op.getOperand(0).getType()) &&
+         isa<MemRefType>(op.getResult(0).getType());
+}
+
 static pto::AddressSpaceAttr getPointerMemorySpace(Attribute memorySpace,
                                                    MLIRContext *ctx) {
   if (auto addrSpace = dyn_cast_or_null<pto::AddressSpaceAttr>(memorySpace)) {
@@ -996,11 +1005,15 @@ struct VPTOPtrNormalizePass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     MLIRContext *context = module.getContext();
+    const bool preserveExternalCallMemRefs =
+        module->hasAttr(kPreserveExternalCallMemRefsAttr);
 
     TypeConverter typeConverter;
     typeConverter.addConversion([](Type type) { return type; });
-    typeConverter.addConversion(
-        [](Type type) { return convertSubviewResultType(type); });
+    if (!preserveExternalCallMemRefs) {
+      typeConverter.addConversion(
+          [](Type type) { return convertSubviewResultType(type); });
+    }
     typeConverter.addTargetMaterialization(materializeUnrealizedCast);
     typeConverter.addSourceMaterialization(materializeUnrealizedCast);
 
@@ -1023,10 +1036,17 @@ struct VPTOPtrNormalizePass
         [&](func::ReturnOp op) { return typeConverter.isLegal(op); });
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
         [&](UnrealizedConversionCastOp op) {
+          if (preserveExternalCallMemRefs &&
+              isExternalCallMemRefBridge(op)) {
+            return true;
+          }
           return !hasPtrNormalizeConvertibleType(op->getOperandTypes()) &&
                  !hasPtrNormalizeConvertibleType(op->getResultTypes());
         });
     target.addDynamicallyLegalOp<memref::CastOp>([&](memref::CastOp op) {
+      if (preserveExternalCallMemRefs) {
+        return true;
+      }
       return !hasPtrNormalizeConvertibleType(op.getSource().getType()) &&
              !hasPtrNormalizeConvertibleType(op.getType());
     });

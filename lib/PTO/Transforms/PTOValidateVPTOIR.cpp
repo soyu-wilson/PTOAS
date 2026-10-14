@@ -51,6 +51,9 @@ LogicalResult validateVPTOEmissionIR(ModuleOp module,
 
 namespace detail {
 
+static constexpr StringLiteral kPreserveExternalCallMemRefsAttr =
+    "pto.preserve_external_call_memrefs";
+
 static Operation *getFirstNonConstantLikeOp(Block *block) {
   if (!block) {
     return nullptr;
@@ -1184,6 +1187,10 @@ private:
   }
 
   LogicalResult validateEmissionFunctionSurface() {
+    if (helper.getModule()->hasAttr(kPreserveExternalCallMemRefsAttr)) {
+      return success();
+    }
+
     for (func::FuncOp func : helper.getFunctions()) {
       FunctionType functionType = func.getFunctionType();
 
@@ -1209,6 +1216,8 @@ private:
   }
 
   LogicalResult validateEmissionOperationSurface() {
+    const bool preserveExternalCallMemRefs =
+        helper.getModule()->hasAttr(kPreserveExternalCallMemRefsAttr);
     WalkResult walkResult = helper.getModule().walk([&](Operation *op) {
       if (isa<BuildAsyncSessionOp, TPutAsyncOp, TGetAsyncOp,
               WaitAsyncEventOp, TestAsyncEventOp>(op)) {
@@ -1236,7 +1245,8 @@ private:
         }
       }
 
-      if (VPTOLegalityHelper::isResidualEmissionScaffold(op)) {
+      if (!preserveExternalCallMemRefs &&
+          VPTOLegalityHelper::isResidualEmissionScaffold(op)) {
         op->emitOpError()
             << "must be eliminated before emission-stage VPTO validation";
         return WalkResult::interrupt();
