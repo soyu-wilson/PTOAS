@@ -321,6 +321,13 @@ static bool compileHostStubToObjectDriverMode(
                               "host stub compilation (driver mode)");
 }
 
+static bool compileDeviceLLVMToObject(llvm::StringRef llPath,
+                                      llvm::StringRef outObjPath,
+                                      llvm::StringRef targetCPU,
+                                      llvm::StringRef bishengPath,
+                                      llvm::StringRef aicoreLLModulePath,
+                                      llvm::StringRef stderrPath,
+                                      llvm::raw_ostream &diagOS);
 static bool compileHostStubToObject(llvm::StringRef stubPath,
                                     llvm::StringRef outObjPath,
                                     llvm::StringRef moduleId,
@@ -858,6 +865,64 @@ static void appendCceAicoreMllvmFlags(
       "-mllvm",
       "-cce-aicore-dcci-insert-for-scalar=false",
   });
+static bool compileDeviceLLVMToObject(llvm::StringRef llPath,
+                                      llvm::StringRef outObjPath,
+                                      llvm::StringRef targetCPU,
+                                      llvm::StringRef bishengPath,
+                                      llvm::StringRef aicoreLLModulePath,
+                                      llvm::StringRef stderrPath,
+                                      llvm::raw_ostream &diagOS) {
+  llvm::SmallVector<std::string, mlir::pto::kValue24> args = {
+      bishengPath.str(),
+      std::string("--cce-aicore-arch=") + targetCPU.str(),
+      "--cce-aicore-only",
+      "-O2",
+      "--cce-generic-addrspace=off",
+      "-cce-bitcode-is-aicore",
+      "-Wno-override-module",
+      "-dc",
+      "--cce-long-scbz=true",
+      "-mllvm",
+      "-cce-dyn-kernel-stack-size=true",
+  };
+  if (!aicoreLLModulePath.empty()) {
+    args.push_back("-cce-link-aicore-ll-module");
+    args.push_back(aicoreLLModulePath.str());
+  }
+  switch (bishengVFAutoSyncMode) {
+  case BishengVFAutoSyncMode::Unspecified:
+    break;
+  case BishengVFAutoSyncMode::Off:
+    args.push_back("-mllvm");
+    args.push_back("-cce-vf-auto-sync=off");
+    break;
+  case BishengVFAutoSyncMode::Fused:
+    args.push_back("-mllvm");
+    args.push_back("-cce-vf-auto-sync=fused");
+    break;
+  case BishengVFAutoSyncMode::Global:
+    args.push_back("-mllvm");
+    args.push_back("-cce-vf-auto-sync=global");
+    break;
+  }
+  // Enabling vector MI scheduling deliberately omits this argument instead of
+  // passing `=1`, so Bisheng retains the default behavior of the selected
+  // toolchain version.
+  if (!enableBishengVecMISched) {
+    args.push_back("-mllvm");
+    args.push_back("--cce-aicore-vec-misched=0");
+  }
+  args.push_back("-mllvm");
+  args.push_back(std::string("--cce-simt-fpmath-combine=") +
+                 (enableSimtFastMath ? "true" : "false"));
+  args.push_back("-c");
+  args.push_back("-x");
+  args.push_back("ir");
+  args.push_back("-");
+  args.push_back("-o");
+  args.push_back(outObjPath.str());
+  return runCommandWithStderr(bishengPath, args, stderrPath, diagOS,
+                              "device LLVM compilation", llPath);
 }
 
 static bool compileCppDeviceSourceToObject(
@@ -1215,7 +1280,13 @@ mlir::pto::CANNToolchain::create(llvm::raw_ostream &diagOS) {
   toolchain.bishengCompilerBinDirPath =
       joinPath(toolchain.ascendHomePath, "tools/bisheng_compiler/bin");
   toolchain.cannVersionString =
+<<<<<<< HEAD
       discoverCANNVersion(toolchain.ascendHomePath).value_or("9.0.0");
+=======
+      discoverCANNVersion(toolchain.ascendHomePath).value_or("9.0.0-beta.1");
+  if (auto env = getEnvPath("PTOAS_AICORE_LL_MODULE"))
+    toolchain.aicoreLLModulePath = *env;
+>>>>>>> bbf7f217c (Support native template fallback linking)
   llvm::SmallVector<std::string, mlir::pto::kValue8> cppIncludeDirs = discoverCppIncludeDirs(
       toolchain.ascendHomePath, diagOS, toolchain.ptoIsaPath);
   toolchain.cppIncludeDirs.assign(cppIncludeDirs.begin(),
@@ -1243,6 +1314,12 @@ mlir::pto::CANNToolchain::validate(llvm::raw_ostream &diagOS) const {
   }
   if (ldLldPath.empty() || !llvm::sys::fs::exists(ldLldPath)) {
     diagOS << "Error: unable to locate ld.lld.\n";
+    return failure();
+  }
+  if (!aicoreLLModulePath.empty() &&
+      !llvm::sys::fs::exists(aicoreLLModulePath)) {
+    diagOS << "Error: PTOAS_AICORE_LL_MODULE does not exist: "
+           << aicoreLLModulePath << "\n";
     return failure();
   }
   return success();
@@ -1295,8 +1372,16 @@ mlir::LogicalResult mlir::pto::compileLLVMToDeviceObject(
     llvm::StringRef stderrPath, llvm::raw_ostream &diagOS,
     BishengSchedulerMode schedulerMode) {
   return compileDeviceLLVMToObject(llPath, outObjPath, getTargetCPU(target),
+<<<<<<< HEAD
                                    toolchain.bishengPath, stderrPath, diagOS,
                                    schedulerMode)
+=======
+                                   toolchain.bishengPath,
+                                   target == ObjectEmissionDeviceTarget::Cube
+                                       ? toolchain.aicoreLLModulePath
+                                       : llvm::StringRef(),
+                                   stderrPath, diagOS)
+>>>>>>> bbf7f217c (Support native template fallback linking)
              ? success()
              : failure();
 }
@@ -1436,6 +1521,7 @@ static mlir::LogicalResult emitVPTODeviceObject(
 mlir::LogicalResult mlir::pto::emitVPTOVectorDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
     const CANNToolchain &toolchain, llvm::StringRef stderrPath,
+<<<<<<< HEAD
     llvm::raw_ostream &diagOS,
     BishengSchedulerMode schedulerMode, BridgeLinkInputs bridge,
     PrintDTDataMode printMode) {
@@ -1443,11 +1529,31 @@ mlir::LogicalResult mlir::pto::emitVPTOVectorDeviceObject(
                               ObjectEmissionDeviceTarget::Vector, toolchain,
                               stderrPath, diagOS, schedulerMode, bridge,
                               printMode);
+=======
+    llvm::raw_ostream &diagOS) {
+  if (failed(applyVPTOLLVMABINames(
+          module,
+          toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Vector),
+          diagOS))) {
+    return failure();
+  }
+  if (failed(writeLLVMModule(module, llPath, diagOS))) {
+    return failure();
+  }
+  return compileDeviceLLVMToObject(llPath, outObjPath,
+                                   resolveTargetCPU(module,
+                                                    ObjectEmissionDeviceTarget::Vector),
+                                   toolchain.bishengPath, llvm::StringRef(),
+                                   stderrPath, diagOS)
+             ? success()
+             : failure();
+>>>>>>> bbf7f217c (Support native template fallback linking)
 }
 
 mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
     const CANNToolchain &toolchain, llvm::StringRef stderrPath,
+<<<<<<< HEAD
     llvm::raw_ostream &diagOS,
     BishengSchedulerMode schedulerMode, BridgeLinkInputs bridge,
     PrintDTDataMode printMode) {
@@ -1455,6 +1561,26 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
                               ObjectEmissionDeviceTarget::Cube, toolchain,
                               stderrPath, diagOS, schedulerMode, bridge,
                               printMode);
+=======
+    llvm::raw_ostream &diagOS) {
+  if (failed(applyVPTOLLVMABINames(
+          module,
+          toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Cube),
+          diagOS))) {
+    return failure();
+  }
+  if (failed(writeLLVMModule(module, llPath, diagOS))) {
+    return failure();
+  }
+  return compileDeviceLLVMToObject(llPath, outObjPath,
+                                   resolveTargetCPU(module,
+                                                    ObjectEmissionDeviceTarget::Cube),
+                                   toolchain.bishengPath,
+                                   toolchain.aicoreLLModulePath, stderrPath,
+                                   diagOS)
+             ? success()
+             : failure();
+>>>>>>> bbf7f217c (Support native template fallback linking)
 }
 
 mlir::LogicalResult mlir::pto::emitFatobjLLVM(
