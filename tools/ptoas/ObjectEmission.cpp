@@ -898,6 +898,22 @@ getNativeTemplateFallbackSymbols(const llvm::Module &module) {
   return symbols;
 }
 
+static bool getNativeTemplateFallbackEnabled(bool &enabled,
+                                             llvm::raw_ostream &diagOS) {
+  enabled = false;
+  const char *value = std::getenv("FALLBACK");
+  llvm::StringRef mode = value ? llvm::StringRef(value).trim() : llvm::StringRef();
+  if (!value || !*value || mode == "0") {
+    return true;
+  }
+  if (mode == "1") {
+    enabled = true;
+    return true;
+  }
+  diagOS << "Error: FALLBACK must be 0 or 1, got '" << value << "'\n";
+  return false;
+}
+
 static bool selectivelyLinkNativeTemplateBitcode(
     llvm::StringRef llPath, llvm::StringRef nativeBitcodePath,
     const mlir::pto::CANNToolchain &toolchain,
@@ -1540,6 +1556,17 @@ static mlir::LogicalResult emitVPTODeviceObject(
   std::string nativeLinkedPath;
   llvm::FileRemover removeNativeLinked;
   if (fallbackSymbols && !fallbackSymbols->empty()) {
+    bool fallbackEnabled = false;
+    if (!getNativeTemplateFallbackEnabled(fallbackEnabled, diagOS)) {
+      return mlir::failure();
+    }
+    if (!fallbackEnabled) {
+      diagOS << "Error: unresolved native template calls with FALLBACK=0: ";
+      llvm::interleaveComma(*fallbackSymbols, diagOS);
+      diagOS << "\nSet FALLBACK=1 to enable native NPU-IR template "
+                "fallback.\n";
+      return mlir::failure();
+    }
     if (toolchain.aicoreLLModulePath.empty()) {
       diagOS << "Error: native template fallback requires "
                 "PTOAS_AICORE_LL_MODULE for: ";
