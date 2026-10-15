@@ -66,6 +66,24 @@ constexpr llvm::StringLiteral kVectorSuffix = "_mix_aiv";
 constexpr llvm::StringLiteral kCubeSuffix = "_mix_aic";
 constexpr llvm::StringLiteral kPreserveExternalCallMemRefsAttr =
     "pto.preserve_external_call_memrefs";
+constexpr llvm::StringLiteral kNativeTemplateFallbackSymbolsAttr =
+    "pto.native_template_fallback_symbols";
+
+static void attachNativeTemplateFallbackMetadata(ModuleOp sourceModule,
+                                                 llvm::Module &llvmModule) {
+  auto symbols = sourceModule->getAttrOfType<ArrayAttr>(
+      kNativeTemplateFallbackSymbolsAttr);
+  if (!symbols)
+    return;
+
+  llvm::NamedMDNode *metadata = llvmModule.getOrInsertNamedMetadata(
+      kNativeTemplateFallbackSymbolsAttr);
+  for (StringAttr symbol : symbols.getAsRange<StringAttr>()) {
+    metadata->addOperand(llvm::MDNode::get(
+        llvmModule.getContext(),
+        llvm::MDString::get(llvmModule.getContext(), symbol.getValue())));
+  }
+}
 
 static std::string getElementTypeFragment(Type type);
 static Type getElementTypeFromVectorLike(Type type);
@@ -11997,6 +12015,7 @@ emitDeviceLLVMModule(ModuleOp deviceModule, StringRef kernelKind,
     return failure();
   }
 
+  attachNativeTemplateFallbackMetadata(deviceModule, *llvmModule);
   applyArtifactVisibilityLinkage(deviceModule, *llvmModule);
   for (llvm::Function &func : *llvmModule) {
     if (!func.getName().starts_with("llvm.hivm.vscatter."))

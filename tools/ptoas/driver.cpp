@@ -1192,7 +1192,8 @@ static LogicalResult emitVPTOLLVMDeviceObject(
           jobResult.vptoCubeModule.module.get(),
           jobResult.vptoVectorModule.module.get(), outputPath, *toolchain,
           context.getTempFiles(), context.getVFSIMTSizeFixMode(),
-          llvm::errs()))) {
+          llvm::errs(), context.getBishengSchedulerMode(),
+          jobResult.vptoBridgeWrappers, jobResult.vptoPrintMode))) {
     return failure();
   }
   return success();

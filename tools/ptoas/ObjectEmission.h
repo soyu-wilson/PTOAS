@@ -167,7 +167,10 @@ LogicalResult emitDeviceObjectLLVM(
     llvm::Module *cubeModule, llvm::Module *vectorModule,
     llvm::StringRef outputPath, const CANNToolchain &toolchain,
     TempFileRegistry &tempFiles, VFSIMTSizeFixMode vfsimtSizeFixMode,
-    llvm::raw_ostream &diagOS);
+    llvm::raw_ostream &diagOS,
+    BishengSchedulerMode schedulerMode = BishengSchedulerMode::Auto,
+    llvm::ArrayRef<BridgeWrapperTU> bridgeWrappers = {},
+    PrintDTDataMode printMode = PrintDTDataMode::None);
 
 LogicalResult mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                  llvm::StringRef outObjPath,
