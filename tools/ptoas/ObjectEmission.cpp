@@ -20,6 +20,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
@@ -43,6 +44,9 @@ enum class BishengVFAutoSyncMode {
   Fused,
   Global,
 };
+
+constexpr llvm::StringLiteral kNativeTemplateFallbackSymbolsMetadata =
+    "pto.native_template_fallback_symbols";
 
 static llvm::cl::opt<bool> enableBishengVecMISched(
     "enable-bisheng-vec-misched",
@@ -610,6 +614,78 @@ static bool compileDeviceLLVMToObject(llvm::StringRef llPath,
                               "device LLVM compilation", llPath);
 }
 
+static std::optional<llvm::SmallVector<std::string, mlir::pto::kValue8>>
+getNativeTemplateFallbackSymbols(const llvm::Module &module) {
+  const llvm::NamedMDNode *metadata =
+      module.getNamedMetadata(kNativeTemplateFallbackSymbolsMetadata);
+  if (!metadata)
+    return std::nullopt;
+
+  llvm::SmallVector<std::string, mlir::pto::kValue8> symbols;
+  for (const llvm::MDNode *node : metadata->operands()) {
+    if (node->getNumOperands() != 1)
+      continue;
+    auto *symbol =
+        llvm::dyn_cast<llvm::MDString>(node->getOperand(0).get());
+    if (symbol)
+      symbols.push_back(symbol->getString().str());
+  }
+  return symbols;
+}
+
+static bool selectivelyLinkNativeTemplateBitcode(
+    llvm::StringRef llPath, llvm::StringRef nativeBitcodePath,
+    const mlir::pto::CANNToolchain &toolchain,
+    llvm::ArrayRef<std::string> fallbackSymbols, std::string &linkedPath,
+    llvm::raw_ostream &diagOS) {
+  std::string llvmLinkPath =
+      joinPath(toolchain.bishengCompilerBinDirPath, "llvm-link");
+  if (!llvm::sys::fs::exists(llvmLinkPath)) {
+    diagOS << "Error: native template fallback requires CANN llvm-link: "
+           << llvmLinkPath << "\n";
+    return false;
+  }
+
+  llvm::SmallString<mlir::pto::kValue256> linkedPattern(llPath);
+  linkedPattern += ".native-%%%%%%.bc";
+  int linkedFD = -1;
+  llvm::SmallString<mlir::pto::kValue256> linkedTempPath;
+  std::error_code ec = llvm::sys::fs::createUniqueFile(
+      linkedPattern, linkedFD, linkedTempPath);
+  if (ec) {
+    diagOS << "Error: failed to create selective native template bitcode: "
+           << ec.message() << "\n";
+    return false;
+  }
+  llvm::sys::Process::SafelyCloseFileDescriptor(linkedFD);
+  linkedPath = linkedTempPath.str().str();
+
+  llvm::SmallString<mlir::pto::kValue256> stderrPattern(llPath);
+  stderrPattern += ".native-link-%%%%%%.log";
+  int stderrFD = -1;
+  llvm::SmallString<mlir::pto::kValue256> linkerStderrPath;
+  ec = llvm::sys::fs::createUniqueFile(stderrPattern, stderrFD,
+                                       linkerStderrPath);
+  if (ec) {
+    diagOS << "Error: failed to create native template linker log: "
+           << ec.message() << "\n";
+    llvm::sys::fs::remove(linkedPath);
+    return false;
+  }
+  llvm::sys::Process::SafelyCloseFileDescriptor(stderrFD);
+  llvm::FileRemover removeStderr(linkerStderrPath);
+
+  diagOS << "PTOAS native template fallback: selectively linking ";
+  llvm::interleaveComma(fallbackSymbols, diagOS);
+  diagOS << "\n";
+
+  llvm::SmallVector<std::string, mlir::pto::kValue8> args = {
+      llvmLinkPath, "--only-needed", llPath.str(), nativeBitcodePath.str(),
+      "-o", linkedPath};
+  return runCommandWithStderr(llvmLinkPath, args, linkerStderrPath, diagOS,
+                              "selective native template bitcode link");
+}
+
 static bool compileCppDeviceSourceToObject(
     llvm::StringRef cppPath, llvm::StringRef outObjPath,
     llvm::StringRef targetCPU, const mlir::pto::CANNToolchain &toolchain,
@@ -1166,6 +1242,7 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
     const CANNToolchain &toolchain, llvm::StringRef stderrPath,
     llvm::raw_ostream &diagOS) {
+  auto fallbackSymbols = getNativeTemplateFallbackSymbols(module);
   if (failed(applyVPTOLLVMABINames(
           module,
           toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Cube),
@@ -1175,6 +1252,44 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
   if (failed(writeLLVMModule(module, llPath, diagOS))) {
     return failure();
   }
+
+  // New NPU-IR bridge modules carry an explicit list, including an empty list
+  // when every template has a PTO implementation. Inputs without the metadata
+  // retain the legacy environment-driven link behavior.
+  if (fallbackSymbols) {
+    if (fallbackSymbols->empty()) {
+      return compileDeviceLLVMToObject(
+                 llPath, outObjPath,
+                 resolveTargetCPU(module, ObjectEmissionDeviceTarget::Cube),
+                 toolchain.bishengPath, llvm::StringRef(), stderrPath, diagOS)
+                 ? success()
+                 : failure();
+    }
+    if (toolchain.aicoreLLModulePath.empty()) {
+      diagOS << "Error: native template fallback requires "
+                "PTOAS_AICORE_LL_MODULE for: ";
+      llvm::interleaveComma(*fallbackSymbols, diagOS);
+      diagOS << "\n";
+      return failure();
+    }
+
+    std::string linkedPath;
+    if (!selectivelyLinkNativeTemplateBitcode(
+            llPath, toolchain.aicoreLLModulePath, toolchain, *fallbackSymbols,
+            linkedPath, diagOS)) {
+      if (!linkedPath.empty())
+        llvm::sys::fs::remove(linkedPath);
+      return failure();
+    }
+    llvm::FileRemover removeLinked(linkedPath);
+    return compileDeviceLLVMToObject(
+               linkedPath, outObjPath,
+               resolveTargetCPU(module, ObjectEmissionDeviceTarget::Cube),
+               toolchain.bishengPath, llvm::StringRef(), stderrPath, diagOS)
+               ? success()
+               : failure();
+  }
+
   return compileDeviceLLVMToObject(llPath, outObjPath,
                                    resolveTargetCPU(module,
                                                     ObjectEmissionDeviceTarget::Cube),
