@@ -54,6 +54,7 @@ public:
   std::string bishengCompilerBinDirPath;
   std::string ptoIsaPath;
   std::string aicoreLLModulePath;
+  std::string aivLLModulePath;
   std::string cannVersionString;
   CANNVersion cannVersion = kDefaultCANNVersion;
   std::vector<std::string> cppIncludeDirs;

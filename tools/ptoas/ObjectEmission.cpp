@@ -891,7 +891,19 @@ getNativeTemplateFallbackSymbols(const llvm::Module &module) {
     }
     auto *symbol =
         llvm::dyn_cast<llvm::MDString>(node->getOperand(0).get());
-    if (symbol) {
+    if (!symbol) {
+      continue;
+    }
+    // A mixed source module carries both AIC and AIV names. Only link the
+    // declarations referenced by this device's LLVM module.
+    const llvm::Function *function = module.getFunction(symbol->getString());
+    const llvm::Function *wrapper =
+        module.getFunction(("_mlir_ciface_" + symbol->getString()).str());
+    // emit_c_interface also builds a private native-ABI forwarding function
+    // for unused declarations. Its ciface call alone does not make it live.
+    const bool referenced = function ? !function->use_empty()
+        : (wrapper && wrapper->isDeclaration() && !wrapper->use_empty());
+    if (referenced) {
       symbols.push_back(symbol->getString().str());
     }
   }
@@ -1325,6 +1337,20 @@ mlir::pto::CANNToolchain::create(llvm::raw_ostream &diagOS) {
       discoverCANNVersion(toolchain.ascendHomePath).value_or("9.0.0-beta.1");
   if (auto env = getEnvPath("PTOAS_AICORE_LL_MODULE"))
     toolchain.aicoreLLModulePath = *env;
+  if (auto env = getEnvPath("PTOAS_AIVECTOR_LL_MODULE")) {
+    toolchain.aivLLModulePath = *env;
+  } else {
+    // Standard NPU-IR installs keep the AIC/AIV bundles next to each other.
+    llvm::SmallString<kValue256> vectorPath(toolchain.aicoreLLModulePath);
+    std::string name = llvm::sys::path::filename(vectorPath).str();
+    size_t core = name.find(".aic.");
+    if (core != std::string::npos) {
+      name.replace(core, 5, ".aiv.");
+      llvm::sys::path::remove_filename(vectorPath);
+      llvm::sys::path::append(vectorPath, name);
+      toolchain.aivLLModulePath = vectorPath.str().str();
+    }
+  }
   llvm::SmallVector<std::string, mlir::pto::kValue8> cppIncludeDirs = discoverCppIncludeDirs(
       toolchain.ascendHomePath, diagOS, toolchain.ptoIsaPath);
   toolchain.cppIncludeDirs.assign(cppIncludeDirs.begin(),
@@ -1528,8 +1554,7 @@ static mlir::LogicalResult emitVPTODeviceObject(
     llvm::raw_ostream &diagOS, mlir::pto::BishengSchedulerMode schedulerMode,
     mlir::pto::BridgeLinkInputs bridge, mlir::pto::PrintDTDataMode printMode) {
   const bool cube = target == mlir::pto::ObjectEmissionDeviceTarget::Cube;
-  auto fallbackSymbols = cube ? getNativeTemplateFallbackSymbols(module)
-                              : std::nullopt;
+  auto fallbackSymbols = getNativeTemplateFallbackSymbols(module);
   if (mlir::failed(applyVPTOLLVMABINames(
           module, toolchain.vptoPublicABISuffix(target), diagOS))) {
     return mlir::failure();
@@ -1567,15 +1592,19 @@ static mlir::LogicalResult emitVPTODeviceObject(
                 "fallback.\n";
       return mlir::failure();
     }
-    if (toolchain.aicoreLLModulePath.empty()) {
+    llvm::StringRef bitcode = cube ? toolchain.aicoreLLModulePath
+                                  : toolchain.aivLLModulePath;
+    const bool validBitcode = !bitcode.empty() && llvm::sys::fs::is_regular_file(bitcode);
+    if (!validBitcode) {
       diagOS << "Error: native template fallback requires "
-                "PTOAS_AICORE_LL_MODULE for: ";
+             << (cube ? "PTOAS_AICORE_LL_MODULE" : "PTOAS_AIVECTOR_LL_MODULE")
+             << " pointing to the matching native bundle for: ";
       llvm::interleaveComma(*fallbackSymbols, diagOS);
       diagOS << "\n";
       return mlir::failure();
     }
     const bool linked = selectivelyLinkNativeTemplateBitcode(
-        compileInput, toolchain.aicoreLLModulePath, toolchain,
+        compileInput, bitcode, toolchain,
         *fallbackSymbols, nativeLinkedPath, diagOS);
     if (!nativeLinkedPath.empty()) {
       removeNativeLinked.setFile(nativeLinkedPath);
