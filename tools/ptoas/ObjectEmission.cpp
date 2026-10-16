@@ -627,7 +627,17 @@ getNativeTemplateFallbackSymbols(const llvm::Module &module) {
       continue;
     auto *symbol =
         llvm::dyn_cast<llvm::MDString>(node->getOperand(0).get());
-    if (symbol)
+    if (!symbol)
+      continue;
+    // A mixed source module carries both AIC and AIV names. Only link the
+    // declarations referenced by this device's LLVM module.
+    const llvm::Function *function = module.getFunction(symbol->getString());
+    const llvm::Function *wrapper =
+        module.getFunction(("_mlir_ciface_" + symbol->getString()).str());
+    // emit_c_interface also builds a private native-ABI forwarding function
+    // for unused declarations. Its ciface call alone does not make it live.
+    if (function ? !function->use_empty()
+                 : (wrapper && wrapper->isDeclaration() && !wrapper->use_empty()))
       symbols.push_back(symbol->getString().str());
   }
   return symbols;
@@ -1037,6 +1047,20 @@ mlir::pto::CANNToolchain::create(llvm::raw_ostream &diagOS) {
       discoverCANNVersion(toolchain.ascendHomePath).value_or("9.0.0-beta.1");
   if (auto env = getEnvPath("PTOAS_AICORE_LL_MODULE"))
     toolchain.aicoreLLModulePath = *env;
+  if (auto env = getEnvPath("PTOAS_AIVECTOR_LL_MODULE")) {
+    toolchain.aivLLModulePath = *env;
+  } else {
+    // Standard NPU-IR installs keep the AIC/AIV bundles next to each other.
+    llvm::SmallString<kValue256> vectorPath(toolchain.aicoreLLModulePath);
+    std::string name = llvm::sys::path::filename(vectorPath).str();
+    size_t core = name.find(".aic.");
+    if (core != std::string::npos) {
+      name.replace(core, 5, ".aiv.");
+      llvm::sys::path::remove_filename(vectorPath);
+      llvm::sys::path::append(vectorPath, name);
+      toolchain.aivLLModulePath = vectorPath.str().str();
+    }
+  }
   llvm::SmallVector<std::string, mlir::pto::kValue8> cppIncludeDirs = discoverCppIncludeDirs(
       toolchain.ascendHomePath, diagOS, toolchain.ptoIsaPath);
   toolchain.cppIncludeDirs.assign(cppIncludeDirs.begin(),
@@ -1230,36 +1254,16 @@ static mlir::LogicalResult applyVPTOLLVMABINames(llvm::Module &module,
   return mlir::success();
 }
 
-mlir::LogicalResult mlir::pto::emitVPTOVectorDeviceObject(
+static mlir::LogicalResult emitVPTODeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
-    const CANNToolchain &toolchain, llvm::StringRef stderrPath,
+    mlir::pto::ObjectEmissionDeviceTarget target,
+    const mlir::pto::CANNToolchain &toolchain, llvm::StringRef stderrPath,
     llvm::raw_ostream &diagOS) {
-  if (failed(applyVPTOLLVMABINames(
-          module,
-          toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Vector),
-          diagOS))) {
-    return failure();
-  }
-  if (failed(writeLLVMModule(module, llPath, diagOS))) {
-    return failure();
-  }
-  return compileDeviceLLVMToObject(llPath, outObjPath,
-                                   resolveTargetCPU(module,
-                                                    ObjectEmissionDeviceTarget::Vector),
-                                   toolchain.bishengPath, llvm::StringRef(),
-                                   stderrPath, diagOS)
-             ? success()
-             : failure();
-}
-
-mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
-    llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
-    const CANNToolchain &toolchain, llvm::StringRef stderrPath,
-    llvm::raw_ostream &diagOS) {
+  using namespace mlir;
+  using mlir::pto::writeLLVMModule;
   auto fallbackSymbols = getNativeTemplateFallbackSymbols(module);
   if (failed(applyVPTOLLVMABINames(
-          module,
-          toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Cube),
+          module, toolchain.vptoPublicABISuffix(target),
           diagOS))) {
     return failure();
   }
@@ -1274,7 +1278,7 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
     if (fallbackSymbols->empty()) {
       return compileDeviceLLVMToObject(
                  llPath, outObjPath,
-                 resolveTargetCPU(module, ObjectEmissionDeviceTarget::Cube),
+                 resolveTargetCPU(module, target),
                  toolchain.bishengPath, llvm::StringRef(), stderrPath, diagOS)
                  ? success()
                  : failure();
@@ -1289,9 +1293,13 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
                 "fallback.\n";
       return failure();
     }
-    if (toolchain.aicoreLLModulePath.empty()) {
+    const bool cube = target == mlir::pto::ObjectEmissionDeviceTarget::Cube;
+    llvm::StringRef bitcode = cube ? toolchain.aicoreLLModulePath
+                                  : toolchain.aivLLModulePath;
+    if (bitcode.empty() || !llvm::sys::fs::is_regular_file(bitcode)) {
       diagOS << "Error: native template fallback requires "
-                "PTOAS_AICORE_LL_MODULE for: ";
+             << (cube ? "PTOAS_AICORE_LL_MODULE" : "PTOAS_AIVECTOR_LL_MODULE")
+             << " pointing to the matching native bundle for: ";
       llvm::interleaveComma(*fallbackSymbols, diagOS);
       diagOS << "\n";
       return failure();
@@ -1299,7 +1307,7 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
 
     std::string linkedPath;
     if (!selectivelyLinkNativeTemplateBitcode(
-            llPath, toolchain.aicoreLLModulePath, toolchain, *fallbackSymbols,
+            llPath, bitcode, toolchain, *fallbackSymbols,
             linkedPath, diagOS)) {
       if (!linkedPath.empty())
         llvm::sys::fs::remove(linkedPath);
@@ -1308,20 +1316,38 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
     llvm::FileRemover removeLinked(linkedPath);
     return compileDeviceLLVMToObject(
                linkedPath, outObjPath,
-               resolveTargetCPU(module, ObjectEmissionDeviceTarget::Cube),
+               resolveTargetCPU(module, target),
                toolchain.bishengPath, llvm::StringRef(), stderrPath, diagOS)
                ? success()
                : failure();
   }
 
   return compileDeviceLLVMToObject(llPath, outObjPath,
-                                   resolveTargetCPU(module,
-                                                    ObjectEmissionDeviceTarget::Cube),
+                                   resolveTargetCPU(module, target),
                                    toolchain.bishengPath,
-                                   toolchain.aicoreLLModulePath, stderrPath,
+                                   target == mlir::pto::ObjectEmissionDeviceTarget::Cube
+                                       ? toolchain.aicoreLLModulePath : llvm::StringRef(), stderrPath,
                                    diagOS)
              ? success()
              : failure();
+}
+
+mlir::LogicalResult mlir::pto::emitVPTOVectorDeviceObject(
+    llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
+    const CANNToolchain &toolchain, llvm::StringRef stderrPath,
+    llvm::raw_ostream &diagOS) {
+  return emitVPTODeviceObject(module, llPath, outObjPath,
+                              ObjectEmissionDeviceTarget::Vector, toolchain,
+                              stderrPath, diagOS);
+}
+
+mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
+    llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
+    const CANNToolchain &toolchain, llvm::StringRef stderrPath,
+    llvm::raw_ostream &diagOS) {
+  return emitVPTODeviceObject(module, llPath, outObjPath,
+                              ObjectEmissionDeviceTarget::Cube, toolchain,
+                              stderrPath, diagOS);
 }
 
 mlir::LogicalResult mlir::pto::emitFatobjLLVM(
