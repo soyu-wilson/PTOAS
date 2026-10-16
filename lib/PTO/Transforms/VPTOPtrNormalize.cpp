@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -41,6 +42,21 @@ static constexpr StringLiteral kPreserveExternalCallMemRefsAttr =
     "pto.preserve_external_call_memrefs";
 
 static bool isExternalCallMemRefBridge(UnrealizedConversionCastOp op) {
+  if (op->getNumOperands() == 1 && op->getNumResults() == 1) {
+    auto memref = dyn_cast<MemRefType>(op.getOperand(0).getType());
+    auto descriptor = dyn_cast<LLVM::LLVMStructType>(op.getResult(0).getType());
+    if (memref && memref.getRank() == 0 && descriptor &&
+        !descriptor.isOpaque()) {
+      auto space = dyn_cast_or_null<pto::AddressSpaceAttr>(memref.getMemorySpace());
+      auto fields = descriptor.getBody();
+      if (space && fields.size() == 3) {
+        auto pointer = LLVM::LLVMPointerType::get(
+            op.getContext(), static_cast<unsigned>(space.getAddressSpace()));
+        if (fields[0] == pointer && fields[1] == pointer && fields[2].isInteger(64))
+          return true;
+      }
+    }
+  }
   return op->getNumOperands() == 1 && op->getNumResults() == 1 &&
          isa<pto::PtrType>(op.getOperand(0).getType()) &&
          isa<MemRefType>(op.getResult(0).getType());

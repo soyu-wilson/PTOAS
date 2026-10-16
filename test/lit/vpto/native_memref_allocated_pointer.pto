@@ -1,0 +1,21 @@
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --emit-vpto-llvm-ir %s -o %t.ll
+// RUN: FileCheck %s < %t.ll
+
+// Keep both addresses in a native descriptor. In particular, extracting the
+// allocated pointer must survive PTO pointer normalization and LLVM lowering.
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>, pto.preserve_external_call_memrefs, pto.target_arch = "a5"} {
+  func.func @descriptor_probe(%ptr: !pto.ptr<f32, ub>) attributes {pto.kernel} {
+    %view = builtin.unrealized_conversion_cast %ptr : !pto.ptr<f32, ub> to memref<64xf32, #pto.address_space<vec>>
+    %base, %offset, %size, %stride = memref.extract_strided_metadata %view : memref<64xf32, #pto.address_space<vec>> -> memref<f32, #pto.address_space<vec>>, index, index, index
+    %descriptor = builtin.unrealized_conversion_cast %base : memref<f32, #pto.address_space<vec>> to !llvm.struct<(ptr<6>, ptr<6>, i64)>
+    %allocated = llvm.extractvalue %descriptor[0] : !llvm.struct<(ptr<6>, ptr<6>, i64)>
+    %address = llvm.ptrtoint %allocated : !llvm.ptr<6> to i64
+    %dst = pto.castptr %address : i64 -> !pto.ptr<f32, ub>
+    %zero = arith.constant 0 : index
+    %one = arith.constant 1.0 : f32
+    pto.store_scalar %one, %dst[%zero] : <f32, ub>, f32
+    return
+  }
+}
+// CHECK-LABEL: define void @descriptor_probe
+// CHECK: store float 1.000000e+00, ptr addrspace(6)
