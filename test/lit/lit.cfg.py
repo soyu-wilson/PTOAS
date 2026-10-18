@@ -55,6 +55,20 @@ llvm_config.with_system_environment(
      'ASCEND_HOME_PATH', 'ASCEND_OPP_PATH', 'ASCEND_AICPU_PATH',
      'ASCEND_TOOLKIT_HOME', 'LD_LIBRARY_PATH', 'PYTHONPATH'])
 
+# Native-template object-link tests opt in with a matching NPU-IR AIC bundle
+# and its AIV sibling. Ordinary compiler tests do not require these or CANN.
+native_aic_bitcode = os.environ.get('PTOAS_AICORE_LL_MODULE', '')
+native_aic_name = os.path.basename(native_aic_bitcode)
+native_aiv_bitcode = os.path.join(
+    os.path.dirname(native_aic_bitcode), native_aic_name.replace('.aic.', '.aiv.'))
+if (os.environ.get('ASCEND_HOME_PATH')
+        and '.aic.' in native_aic_name
+        and os.path.isfile(native_aic_bitcode)
+        and os.path.isfile(native_aiv_bitcode)):
+    config.available_features.add('cann-native-template-fallback')
+    llvm_config.with_system_environment(['PTOAS_AICORE_LL_MODULE'])
+    config.substitutions.append(('%native_aiv_bitcode', native_aiv_bitcode))
+
 # Keep build-tree lit tests self-contained. The PTOAS build stages the complete
 # MLIR Python runtime together with generated PTO dialect modules and the PTO
 # extension under one build-tree Python root.

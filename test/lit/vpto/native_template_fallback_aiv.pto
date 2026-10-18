@@ -1,0 +1,39 @@
+// REQUIRES: cann-native-template-fallback
+// RUN: env -u PTOAS_AIVECTOR_LL_MODULE FALLBACK=1 ptoas --pto-backend=vpto --pto-arch=a5 --emit-device-object %s -o %t.derived.o 2>&1 | FileCheck %s --check-prefix=LINK
+// RUN: test -s %t.derived.o
+// RUN: env PTOAS_AIVECTOR_LL_MODULE="%native_aiv_bitcode" FALLBACK=1 ptoas --pto-backend=vpto --pto-arch=a5 --emit-device-object %s -o %t.explicit.o 2>&1 | FileCheck %s --check-prefix=LINK
+// RUN: test -s %t.explicit.o
+// RUN: not env FALLBACK=0 ptoas --pto-backend=vpto --pto-arch=a5 --emit-device-object %s -o %t.disabled.o 2>&1 | FileCheck %s --check-prefix=DISABLED
+// RUN: not env PTOAS_AIVECTOR_LL_MODULE=%t.missing.bc FALLBACK=1 ptoas --pto-backend=vpto --pto-arch=a5 --emit-device-object %s -o %t.missing.o 2>&1 | FileCheck %s --check-prefix=MISSING
+
+// A preserved AIV store needs its descriptor ABI and the AIV native bundle.
+// Before AIV fallback support, final object linking left its ciface undefined.
+// The metadata also names an unused helper: it must not force native linking
+// for another execution domain merely because its declaration is present.
+// LINK: PTOAS native template fallback: selectively linking store_ubuf_to_gm_2d_float{{$}}
+// LINK-NOT: Error:
+// LINK-NOT: undefined symbol:
+// DISABLED: unresolved native template calls with FALLBACK=0: store_ubuf_to_gm_2d_float
+// MISSING: native template fallback requires PTOAS_AIVECTOR_LL_MODULE
+
+module attributes {
+  pto.target_arch = "a5",
+  pto.preserve_external_call_memrefs,
+  pto.native_template_fallback_symbols = ["store_ubuf_to_gm_2d_float", "unused_cube_template"]
+} {
+  func.func @store_aiv(%dst: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+    pto.section.vector {
+      %zero = arith.constant 0 : i64
+      %atomic_none = arith.constant 0 : i32
+      %src = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+      %src_memref = builtin.unrealized_conversion_cast %src : !pto.ptr<f32, ub> to memref<16x16xf32, #pto.address_space<vec>>
+      %dst_memref = builtin.unrealized_conversion_cast %dst : !pto.ptr<f32, gm> to memref<16x16xf32, #pto.address_space<gm>>
+      %src_cast = memref.cast %src_memref : memref<16x16xf32, #pto.address_space<vec>> to memref<?x?xf32, strided<[?, ?], offset: ?>, #pto.address_space<vec>>
+      %dst_cast = memref.cast %dst_memref : memref<16x16xf32, #pto.address_space<gm>> to memref<?x?xf32, strided<[?, ?], offset: ?>, #pto.address_space<gm>>
+      func.call @store_ubuf_to_gm_2d_float(%src_cast, %dst_cast, %atomic_none) : (memref<?x?xf32, strided<[?, ?], offset: ?>, #pto.address_space<vec>>, memref<?x?xf32, strided<[?, ?], offset: ?>, #pto.address_space<gm>>, i32) -> ()
+    }
+    return
+  }
+  func.func private @store_ubuf_to_gm_2d_float(memref<?x?xf32, strided<[?, ?], offset: ?>, #pto.address_space<vec>>, memref<?x?xf32, strided<[?, ?], offset: ?>, #pto.address_space<gm>>, i32) attributes {llvm.emit_c_interface}
+  func.func private @unused_cube_template(i32) attributes {llvm.emit_c_interface}
+}
