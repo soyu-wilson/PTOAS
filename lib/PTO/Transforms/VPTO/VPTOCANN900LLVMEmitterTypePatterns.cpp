@@ -44,6 +44,13 @@ public:
     }
 
     Value input = adaptor.getOperands().front();
+    const bool pointerBridge = isa<pto::PtrType>(op.getOperand(0).getType()) &&
+        isa<MemRefType>(op.getResult(0).getType()) &&
+        isa<LLVM::LLVMPointerType>(input.getType());
+    if (pointerBridge) {
+      rewriter.replaceOpWithNewOp<UnrealizedConversionCastOp>(op, op.getResult(0).getType(), input);
+      return success();
+    }
     if (input.getType() != convertedResultType) {
       return failure();
     }

@@ -142,6 +142,9 @@ void populateVPTOUbufPatterns(const TypeConverter &typeConverter, RewritePattern
 
 namespace detail {
 
+std::unique_ptr<Pass> createPrepareExternalCallMemRefABIPass();
+void attachNativeTemplateFallbackMetadata(ModuleOp sourceModule, llvm::Module &llvmModule);
+
 inline constexpr llvm::StringLiteral kVectorSuffix = "_mix_aiv";
 inline constexpr llvm::StringLiteral kCubeSuffix = "_mix_aic";
 

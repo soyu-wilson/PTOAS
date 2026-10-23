@@ -11,6 +11,8 @@
 // toolchain stands in for Bisheng.
 //
 // RUN: mkdir -p %t.cann/bin %t.cann/tools/bisheng_compiler/bin
+// RUN: mkdir -p %t.cann/compiler
+// RUN: echo 'Version=9.0.0' > %t.cann/compiler/version.info
 // RUN: printf '#!/bin/sh\nexit 1\n' > %t.cann/bin/bisheng
 // RUN: chmod +x %t.cann/bin/bisheng
 // RUN: cp %t.cann/bin/bisheng %t.cann/bin/cce-ld

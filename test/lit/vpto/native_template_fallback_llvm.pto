@@ -1,0 +1,33 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - | FileCheck %s
+// RUN: sed 's/\["native_store"\]/[]/' %s > %t.empty.pto
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %t.empty.pto -o - | FileCheck %s --check-prefix=EMPTY
+
+// Native calls keep their memref descriptor ABI through the split VPTO emitter.
+// The symbol list must also survive LLVM export for selective object linking.
+module attributes {
+  pto.target_arch = "a5",
+  pto.kernel_kind = #pto.kernel_kind<vector>,
+  pto.preserve_external_call_memrefs,
+  pto.native_template_fallback_symbols = ["native_store"]
+} {
+  func.func @native_abi(%dst: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+    %mem = builtin.unrealized_conversion_cast %dst : !pto.ptr<f32, gm> to memref<4xf32, #pto.address_space<gm>>
+    func.call @native_store(%mem) : (memref<4xf32, #pto.address_space<gm>>) -> ()
+    return
+  }
+  func.func private @native_store(memref<4xf32, #pto.address_space<gm>>) attributes {llvm.emit_c_interface}
+}
+
+// CHECK: define void @native_abi_mix_aiv(ptr addrspace(1)
+// CHECK: call void @_mlir_ciface_native_store(ptr
+// CHECK: !pto.native_template_fallback_symbols = !{![[SYMBOL:[0-9]+]]}
+// CHECK: ![[SYMBOL]] = !{!"native_store"}
+// EMPTY: !pto.native_template_fallback_symbols = !{}

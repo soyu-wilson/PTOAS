@@ -910,10 +910,13 @@ struct ConvertPtrNormalizeMemRefCastOp final
   }
 };
 
-static void populatePtrNormalizeTypeConverter(TypeConverter &typeConverter) {
+static void populatePtrNormalizeTypeConverter(TypeConverter &typeConverter,
+                                                bool preserveExternalCallMemRefs) {
   typeConverter.addConversion([](Type type) { return type; });
-  typeConverter.addConversion(
-      [](Type type) { return convertSubviewResultType(type); });
+  if (!preserveExternalCallMemRefs) {
+    typeConverter.addConversion(
+        [](Type type) { return convertSubviewResultType(type); });
+  }
   typeConverter.addTargetMaterialization(materializeUnrealizedCast);
   typeConverter.addSourceMaterialization(materializeUnrealizedCast);
 }
@@ -990,7 +993,8 @@ static void populateSimtAndSubviewLegality(ConversionTarget &target) {
 }
 
 static void populatePtrNormalizeTarget(ConversionTarget &target,
-                                       TypeConverter &typeConverter) {
+                                       TypeConverter &typeConverter,
+                                       bool preserveExternalCallMemRefs) {
   target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
                          scf::SCFDialect>();
   target.addDynamicallyLegalDialect<pto::PTODialect>([](Operation *op) {
@@ -1007,11 +1011,17 @@ static void populatePtrNormalizeTarget(ConversionTarget &target,
   target.addDynamicallyLegalOp<func::ReturnOp>(
       [&](func::ReturnOp op) { return typeConverter.isLegal(op); });
   target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
-      [&](UnrealizedConversionCastOp op) {
+      [preserveExternalCallMemRefs](UnrealizedConversionCastOp op) {
+        if (preserveExternalCallMemRefs && isExternalCallMemRefBridge(op)) {
+          return true;
+        }
         return !hasPtrNormalizeConvertibleType(op->getOperandTypes()) &&
                !hasPtrNormalizeConvertibleType(op->getResultTypes());
       });
-  target.addDynamicallyLegalOp<memref::CastOp>([&](memref::CastOp op) {
+  target.addDynamicallyLegalOp<memref::CastOp>([preserveExternalCallMemRefs](memref::CastOp op) {
+    if (preserveExternalCallMemRefs) {
+      return true;
+    }
     return !hasPtrNormalizeConvertibleType(op.getSource().getType()) &&
            !hasPtrNormalizeConvertibleType(op.getType());
   });
@@ -1070,148 +1080,10 @@ struct VPTOPtrNormalizePass
         module->hasAttr(kPreserveExternalCallMemRefsAttr);
 
     TypeConverter typeConverter;
-    populatePtrNormalizeTypeConverter(typeConverter);
+    populatePtrNormalizeTypeConverter(typeConverter, preserveExternalCallMemRefs);
 
     ConversionTarget target(*context);
-    populatePtrNormalizeTarget(target, typeConverter);
-    typeConverter.addConversion([](Type type) { return type; });
-    if (!preserveExternalCallMemRefs) {
-      typeConverter.addConversion(
-          [](Type type) { return convertSubviewResultType(type); });
-    }
-    typeConverter.addTargetMaterialization(materializeUnrealizedCast);
-    typeConverter.addSourceMaterialization(materializeUnrealizedCast);
-
-    ConversionTarget target(*context);
-    target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
-                           scf::SCFDialect>();
-    target.addDynamicallyLegalDialect<pto::PTODialect>([](Operation *op) {
-      return !isa<pto::TileBufAddrOp, pto::CastPtrOp,
-                  pto::IntToPtrOp, pto::PtrToIntOp,
-                  pto::VldsOp, pto::VstsOp, pto::VsstbOp>(op);
-    });
-    target.addLegalOp<ModuleOp>();
-    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
-      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
-             typeConverter.isLegal(&op.getBody());
-    });
-    target.addDynamicallyLegalOp<func::CallOp>(
-        [&](func::CallOp op) { return typeConverter.isLegal(op); });
-    target.addDynamicallyLegalOp<func::ReturnOp>(
-        [&](func::ReturnOp op) { return typeConverter.isLegal(op); });
-    target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
-        [&](UnrealizedConversionCastOp op) {
-          if (preserveExternalCallMemRefs &&
-              isExternalCallMemRefBridge(op)) {
-            return true;
-          }
-          return !hasPtrNormalizeConvertibleType(op->getOperandTypes()) &&
-                 !hasPtrNormalizeConvertibleType(op->getResultTypes());
-        });
-    target.addDynamicallyLegalOp<memref::CastOp>([&](memref::CastOp op) {
-      if (preserveExternalCallMemRefs) {
-        return true;
-      }
-      return !hasPtrNormalizeConvertibleType(op.getSource().getType()) &&
-             !hasPtrNormalizeConvertibleType(op.getType());
-    });
-    target.addDynamicallyLegalOp<pto::TileBufAddrOp>([&](pto::TileBufAddrOp op) {
-      return op.getDst().getType() ==
-             typeConverter.convertType(op.getDst().getType());
-    });
-    target.addDynamicallyLegalOp<pto::CastPtrOp>([&](pto::CastPtrOp op) {
-      return !isMemRefType(op.getInput().getType()) &&
-             !isMemRefType(op.getResult().getType());
-    });
-    target.addDynamicallyLegalOp<pto::VldsOp>(
-        [&](pto::VldsOp op) {
-          return isa<pto::PtrType>(op.getSource().getType()) &&
-                 typeConverter.isLegal(op->getResultTypes());
-        });
-    target.addDynamicallyLegalOp<pto::VstsOp>(
-        [&](pto::VstsOp op) {
-          return isa<pto::PtrType>(op.getDestination().getType()) &&
-                 typeConverter.isLegal(op->getResultTypes());
-        });
-    target.addDynamicallyLegalOp<pto::VsstbOp>(
-        [&](pto::VsstbOp op) {
-          return isa<pto::PtrType>(op.getDestination().getType()) &&
-                 typeConverter.isLegal(op->getResultTypes());
-        });
-    target.addDynamicallyLegalOp<pto::LoadScalarOp>(
-        [](pto::LoadScalarOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
-    target.addDynamicallyLegalOp<pto::StoreScalarOp>(
-        [](pto::StoreScalarOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
-    target.addDynamicallyLegalOp<pto::MteUbUbOp>([](pto::MteUbUbOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::RawFillL1Op>([](pto::RawFillL1Op op) {
-      return isa<pto::PtrType>(op.getDst().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteUbL1Op>([](pto::MteUbL1Op op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteGmL1Op>([](pto::MteGmL1Op op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL1UbOp>([](pto::MteL1UbOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL1BtOp>([](pto::MteL1BtOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteGmL1FracOp>([](pto::MteGmL1FracOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL1L0aOp>([](pto::MteL1L0aOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL1L0bOp>([](pto::MteL1L0bOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL1L0aMxOp>([](pto::MteL1L0aMxOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL1L0bMxOp>([](pto::MteL1L0bMxOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL0cL1Op>([](pto::MteL0cL1Op op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL0cGmOp>([](pto::MteL0cGmOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteL0cUbOp>([](pto::MteL0cUbOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::MteUbGmOp>([](pto::MteUbGmOp op) {
-      return isa<pto::PtrType>(op.getSource().getType()) &&
-             isa<pto::PtrType>(op.getDestination().getType());
-    });
-    target.addDynamicallyLegalOp<pto::PTOLoadOp>(
-        [](pto::PTOLoadOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
-    target.addDynamicallyLegalOp<pto::PTOStoreOp>(
-        [](pto::PTOStoreOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
-    target.addDynamicallyLegalOp<pto::SimtLaunchOp>(
-        [](pto::SimtLaunchOp op) {
-          return !hasPtrNormalizeMemRefType(op->getOperandTypes()) &&
-                 llvm::none_of(op.getArgs(), isTransientPtrMemRefBridge);
-        });
-    target.addDynamicallyLegalOp<memref::SubViewOp>(
-        [](memref::SubViewOp op) { return !needsSubviewPtrConversion(op); });
+    populatePtrNormalizeTarget(target, typeConverter, preserveExternalCallMemRefs);
 
     RewritePatternSet patterns(context);
     populatePtrNormalizePatterns(patterns, typeConverter, target, context);

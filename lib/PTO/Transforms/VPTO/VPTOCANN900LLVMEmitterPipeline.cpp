@@ -560,6 +560,7 @@ FailureOr<EmittedLLVMModule> emitDeviceLLVMModule(ModuleOp deviceModule, StringR
     return failure();
   }
 
+  attachNativeTemplateFallbackMetadata(deviceModule, *llvmModule);
   applyArtifactVisibilityLinkage(deviceModule, *llvmModule, simtEntryNames);
   for (llvm::Function &func : *llvmModule) {
     if (!func.getName().starts_with("llvm.hivm.vscatter.")) {
@@ -602,6 +603,7 @@ static LogicalResult runPipeline(ModuleOp module, StringRef march, llvm::raw_ost
   kernelModulePM.addPass(std::make_unique<PrepareVPTOLLVMLoweringPass>());
   kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>(march.str()));
   kernelModulePM.addPass(std::make_unique<LowerVPTOTypesPass>());
+  kernelModulePM.addPass(createPrepareExternalCallMemRefABIPass());
   kernelModulePM.addPass(std::make_unique<NormalizeFuncSignaturesForLLVMLoweringPass>());
   kernelModulePM.addPass(arith::createArithExpandOpsPass());
   // pto-convert-scf-to-cf-with-loop-hints performs the SCF-to-CF conversion for this pipeline:

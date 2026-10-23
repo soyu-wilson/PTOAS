@@ -83,6 +83,7 @@ add_mlir_dialect_library(PTOTransforms
   VPTO/VPTOCANN900LLVMEmitterScalarPatterns.cpp
   VPTO/VPTOCANN900LLVMEmitterTypeHelpers.cpp
   VPTO/VPTOCANN900LLVMEmitterTypePatterns.cpp
+  VPTO/VPTOExternalCallABI.cpp
   VPTO/VPTOLLVMEmitterDispatcher.cpp
   VPTO/VPTOLLVMEmitterHelper.cpp
   VPTO/VPTOPtrNormalize.cpp
