@@ -21,6 +21,7 @@
 // RUN: echo 'families:' >> %t.policy
 // RUN: echo '  print: { enabled_ops: [pto.print] }' >> %t.policy
 // RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --vpto-bridge-policy=%t.policy %s -o %t.o 2>&1 | FileCheck %s --check-prefix=WRAPPER
+// RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object --vpto-bridge-policy=%t.policy %s -o %t.device.o 2>&1 | FileCheck %s --check-prefix=WRAPPER
 //
 // Capture the IR handed to the device compile to check the argument naming.
 // RUN: printf '#!/bin/sh\nprev=""\nfor a in "$@"; do if [ "$prev" = "-o" ]; then : > "$a"; fi; prev="$a"; done\ncase "$*" in *"-x ir"*) cat > %t.device.ll;; esac\nexit 0\n' > %t.cann/bin/bisheng
@@ -34,6 +35,10 @@
 // RUN: FileCheck %s --check-prefix=IMPLICIT < %t.device.ll
 // RUN: env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --vpto-bridge-policy=%t.policy --vpto-print-dtdata=explicit %s -o %t.o > /dev/null 2>&1
 // RUN: FileCheck %s --check-prefix=EXPLICIT < %t.device.ll
+// RUN: env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object --vpto-bridge-policy=%t.policy %s -o %t.device.o > /dev/null 2>&1
+// RUN: FileCheck %s --check-prefix=IMPLICIT < %t.device.ll
+// RUN: env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object --vpto-bridge-policy=%t.policy --vpto-print-dtdata=explicit %s -o %t.device.o > /dev/null 2>&1
+// RUN: FileCheck %s --check-prefix=EXPLICIT < %t.device.ll
 //
 // The host object of a printing kernel is built through the bisheng driver and
 // gets the DebugTunnel close override merged in. Log every invocation to check
@@ -46,6 +51,9 @@
 // RUN: rm -f %t.argv.log
 // RUN: env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --vpto-bridge-policy=%t.policy %s -o %t.o > /dev/null 2>&1
 // RUN: FileCheck %s --check-prefix=HOST < %t.argv.log
+// RUN: rm -f %t.argv.log
+// RUN: env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object --bisheng-vec-misched=off --vpto-bridge-policy=%t.policy %s -o %t.device.o > /dev/null 2>&1
+// RUN: FileCheck %s --check-prefix=DEVICE < %t.argv.log
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @print_kernel(%tunnel: !pto.ptr<i8, gm>) attributes {pto.kernel} {
@@ -75,3 +83,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // forwarded, plus the close override compiled and merged.
 // HOST-DAG: ARGV {{.*}}-xcce{{.*}}--cce-enable-print{{.*}}-D__CCE_ENABLE_PRINT_FOUND_CANN__{{.*}}-Xclang -fcce-include-aibinary
 // HOST-DAG: ARGV {{.*}}-xc++{{.*}}ptoas-print-host-source-{{.*}}.cpp
+
+// Device LLVM compilation needs print support and the requested vector scheduler
+// policy as well as the wrapper compile.
+// DEVICE: ARGV {{.*}}-xcce{{.*}}--cce-enable-print
+// DEVICE: ARGV {{.*}}--cce-enable-print{{.*}}--cce-aicore-vec-misched=0{{.*}}-x ir

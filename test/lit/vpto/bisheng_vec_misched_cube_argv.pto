@@ -18,6 +18,8 @@
 // RUN: cp %t.cann/bin/bisheng %t.cann/tools/bisheng_compiler/bin/bisheng
 // RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --bisheng-vec-misched=on %s -o %t.on.o 2>&1 | FileCheck %s --check-prefix=CUBE-ON
 // RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --bisheng-vec-misched=auto %s -o %t.auto.o 2>&1 | FileCheck %s --check-prefix=CUBE-AUTO
+// RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object --bisheng-vec-misched=on %s -o %t.device.on.o 2>&1 | FileCheck %s --check-prefix=CUBE-ON
+// RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object --bisheng-vec-misched=auto %s -o %t.device.auto.o 2>&1 | FileCheck %s --check-prefix=CUBE-AUTO
 
 module attributes {pto.target_arch = "a5"} {
   func.func @mixed_section_kernel(%arg0: !pto.ptr<i16, gm>)

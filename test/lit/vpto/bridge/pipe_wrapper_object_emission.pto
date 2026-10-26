@@ -18,12 +18,14 @@
 // RUN: cp %t.cann/bin/bisheng %t.cann/tools/bisheng_compiler/bin/bisheng
 // RUN: cp %t.cann/bin/bisheng %t.cann/tools/bisheng_compiler/bin/llvm-link
 // RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t.o 2>&1 | FileCheck %s --check-prefix=WRAPPER --implicit-check-not=--cce-enable-print
+// RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object %s -o %t.device.o 2>&1 | FileCheck %s --check-prefix=WRAPPER --implicit-check-not=--cce-enable-print
 //
 // Now let the wrapper compile succeed so the link step is reached.
 // RUN: printf '#!/bin/sh\nprev=""\nfor a in "$@"; do if [ "$prev" = "-o" ]; then : > "$a"; fi; prev="$a"; done\nexit 0\n' > %t.cann/bin/bisheng
 // RUN: chmod +x %t.cann/bin/bisheng
 // RUN: cp %t.cann/bin/bisheng %t.cann/tools/bisheng_compiler/bin/bisheng
 // RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t.o 2>&1 | FileCheck %s --check-prefix=LINK
+// RUN: not env ASCEND_HOME_PATH=%t.cann ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object %s -o %t.device.o 2>&1 | FileCheck %s --check-prefix=LINK
 
 module attributes {pto.target_arch = "a5"} {
   func.func @pipe_wrapper(%out: !pto.ptr<f32, gm>) {

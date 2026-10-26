@@ -1519,7 +1519,9 @@ mlir::LogicalResult mlir::pto::emitDeviceObjectLLVM(
     llvm::Module *cubeModule, llvm::Module *vectorModule,
     llvm::StringRef outputPath, const CANNToolchain &toolchain,
     TempFileRegistry &tempFiles, VFSIMTSizeFixMode vfsimtSizeFixMode,
-    llvm::raw_ostream &diagOS) {
+    llvm::raw_ostream &diagOS, BishengSchedulerMode schedulerMode,
+    llvm::ArrayRef<BridgeWrapperTU> bridgeWrappers,
+    PrintDTDataMode printMode) {
   if (!cubeModule && !vectorModule) {
     diagOS << "Error: VPTO device object emission requires at least one LLVM "
               "module.\n";
@@ -1527,14 +1529,20 @@ mlir::LogicalResult mlir::pto::emitDeviceObjectLLVM(
   }
 
   VPTOFatobjArtifacts artifacts(tempFiles);
+  artifacts.setPrintMode(printMode);
   if (!artifacts.initCommandLogs(diagOS)) {
     return failure();
   }
-  if (!artifacts.emitCubeObject(cubeModule, toolchain, diagOS)) {
+  if (!artifacts.compileBridgeWrappers(bridgeWrappers, cubeModule != nullptr,
+                                       vectorModule != nullptr, toolchain,
+                                       diagOS)) {
+    return failure();
+  }
+  if (!artifacts.emitCubeObject(cubeModule, toolchain, schedulerMode, diagOS)) {
     return failure();
   }
   if (!artifacts.emitVectorObject(vectorModule, toolchain,
-                                  vfsimtSizeFixMode, diagOS)) {
+                                  vfsimtSizeFixMode, schedulerMode, diagOS)) {
     return failure();
   }
   if (!artifacts.linkDeviceObjects(toolchain, outputPath, diagOS)) {
