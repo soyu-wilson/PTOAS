@@ -262,9 +262,20 @@ ptoas test/lit/pto/empty_func.pto --pto-arch=a5 -o outputfile.cpp
 # Specify build level (level3 disables PlanMemory/InsertSync)
 ptoas test/lit/pto/empty_func.pto --pto-level=level3 -o outputfile.cpp
 
+# Emit a final linked VPTO AICore device ELF
+ptoas kernel.pto --pto-arch=a5 --pto-backend=vpto \
+  --emit-device-object -o kernel.device.o
+
 # Print the current ptoas release version
 ptoas --version
 ```
+
+`--emit-device-object` writes device code without host launch stubs or fatobj
+packaging. Without this flag, VPTO object output is a host-linkable fatobj.
+Device object emission requires a configured CANN/Bisheng toolchain and an
+explicit output file (`-o -` is unsupported). It requires the VPTO backend,
+rejects mixed-backend compilation, and cannot be combined with IR output modes
+such as `--emit-vpto`.
 
 ### 5.2 Python API
 

@@ -189,7 +189,23 @@ the outer module so all submodules share the same target contract.
 ptoas --pto-arch=a5 --pto-backend=vpto kernel.pto -o kernel.o
 ```
 
-This command emits the final device artifact.
+This command emits a host-linkable fatobj containing the device code and host
+launch stubs. To emit a final linked AICore device ELF directly, use:
+
+```bash
+ptoas --pto-arch=a5 --pto-backend=vpto --emit-device-object \
+  kernel.pto -o kernel.device.o
+```
+
+`--emit-device-object` is disabled by default. It writes device code without host
+launch stubs or fatobj packaging, for workflows that consume device binaries
+directly. Device compilation retains scheduler selection, bridge wrappers, print
+support, and VFSIMT size verification according to their configured settings.
+
+This mode requires a configured CANN/Bisheng toolchain (`ASCEND_HOME_PATH`) and
+an explicit output file; stdout output (`-o -`) is unsupported. It requires the
+VPTO backend, rejects mixed-backend compilation, and cannot be combined with IR
+output modes such as `--emit-vpto`.
 
 #### Hardware Pipeline Modeling
 

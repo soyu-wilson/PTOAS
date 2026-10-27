@@ -39,8 +39,9 @@
 | 选项 | 参数 | 默认值 | 作用 |
 |---|---|---:|---|
 | `<input file>` | 路径 | `-` | 输入的 `.pto` 文件；未指定时从标准输入读取 |
-| `-o` | 路径 | `-` | 输出文件名；未指定时输出到标准输出（mixed fatobj 模式要求显式指定 `-o`） |
+| `-o` | 路径 | `-` | 输出文件名；文本输出默认写到标准输出，VPTO 对象输出和 mixed fatobj 模式要求显式指定实际文件路径 |
 | `--pto-arch` | `a3` \| `a5` | `a3` | 指定目标架构 |
+| `--emit-device-object` | 无 | 关闭 | 输出最终链接的 VPTO AICore device ELF，不包含 host launch stub；要求 VPTO backend 和显式 `-o` 文件路径 |
 | `--enable-plan-memory` | 无 | 开启 | 自动内存规划总开关；当前只支持开启，为未显式给出地址的 `pto.alloc_tile` 规划地址 |
 | `--plan-memory-order-by-size` | 无 | 关闭 | 同一地址空间内优先规划较大的本地 buffer，再套用基础复用策略 |
 | `--enable-insert-sync` | 无 | 关闭 | 启用常规自动同步插入 |
@@ -56,6 +57,23 @@
 遇到 VMI 布局搜索预算耗尽时，可仅对当前编译增大预算，例如同时传入
 `--vmi-layout-max-frontier-entries=1024 --vmi-layout-max-transitions=32768`。
 两个参数均必须大于零，按子图分别计数；增大预算可能增加编译时间和内存占用。
+
+## VPTO device object 输出
+
+默认情况下，VPTO backend 的对象输出是可供 host 链接的 fatobj。需要直接消费
+device binary 时，可使用 `--emit-device-object` 输出最终链接的 AICore device ELF，
+其中不包含 host launch stub，也不进行 fatobj 打包：
+
+```bash
+ptoas kernel.pto --pto-arch=a5 --pto-backend=vpto \
+  --emit-device-object -o kernel.device.o
+```
+
+该模式需要配置 CANN/Bisheng 工具链（`ASCEND_HOME_PATH`），且必须通过 `-o`
+指定实际文件路径，不支持标准输出（`-o -`）。它仅适用于 VPTO backend，
+不支持 mixed-backend 编译，且不能与 `--emit-vpto` 等 IR 输出模式同时使用。
+device 编译仍按配置保留 scheduler 选择、bridge wrapper、print 支持和 VFSIMT
+size verification。
 
 ## 选项使用顺序
 

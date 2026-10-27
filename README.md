@@ -315,6 +315,10 @@ ptoas test/lit/pto/empty_func.pto --pto-level=level3 -o outputfile.cpp
 # public function signature 不能直接暴露 !pto.vmi.* 类型
 ptoas test/lit/vmi_new/vmi_ptoas_cli_pipeline.pto --pto-arch=a5 --pto-backend=vpto --emit-vpto -o -
 
+# 输出最终链接的 VPTO AICore device ELF
+ptoas kernel.pto --pto-arch=a5 --pto-backend=vpto \
+  --emit-device-object -o kernel.device.o
+
 # 输出 VPTO 调度分析，不改变 IR
 ptoas input.pto --pto-arch=a5 --pto-backend=vpto --emit-vpto \
   --vpto-scheduler=analyze -o output.cpp
@@ -343,6 +347,12 @@ ptoas input.pto --pto-arch=a5 --pto-backend=vpto \
 ptoas --version
 
 ```
+
+`--emit-device-object` 只输出 device code，输出中不包含 host launch stub，也不进行
+fatobj 打包；不指定该选项时，VPTO 对象输出为可供 host 链接的 fatobj。
+该选项需要配置 CANN/Bisheng 工具链，并通过 `-o` 指定实际文件路径
+（不支持 `-o -`）。它仅适用于 VPTO backend，不支持 mixed-backend 编译，
+且不能与 `--emit-vpto` 等 IR 输出模式同时使用。
 
 `--vpto-bridge-policy` 指定一份 route policy YAML，决定哪些 family 与操作
 经由 VPTO C++ bridge 下降到 PTO-ISA wrapper。它只做选择，ABI 与 wrapper
