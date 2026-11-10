@@ -48,9 +48,10 @@ struct PTOAddressExpr {
 };
 
 /// Prove that a pointer plus an element offset is aligned to the requested
-/// byte boundary. Pointer block arguments are assumed to satisfy their
-/// address-space ABI alignment; derived addptr/cast expressions are accepted
-/// only when their byte remainder can be proven.
+/// byte boundary. Pointer block arguments retain their address-space ABI
+/// alignment assumption. An explicit pto.alignment guarantee can also prove
+/// alignment without tracing an opaque pointer's origin. Derived addptr/cast
+/// expressions and access offsets still require a proven byte remainder.
 bool isKnownAddressAligned(Value pointer, Value elementOffset,
                            Type elementType, int64_t alignmentBytes);
 

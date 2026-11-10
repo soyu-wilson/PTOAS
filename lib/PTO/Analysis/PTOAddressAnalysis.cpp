@@ -210,6 +210,31 @@ getKnownIndexRemainder(Value value, int64_t modulus, unsigned depth = 0) {
 static std::optional<int64_t>
 getKnownPointerRemainder(Value pointer, int64_t alignmentBytes, unsigned depth);
 
+// Frontends may know the alignment of an opaque pointer even when its origin
+// cannot be traced here. This is an additional guarantee about the exact
+// pointer value; addptr and access offsets are still checked separately.
+static std::optional<int64_t> getExplicitPointerAlignment(Value pointer) {
+  IntegerAttr attr;
+  if (auto arg = dyn_cast<BlockArgument>(pointer)) {
+    auto func = dyn_cast_or_null<func::FuncOp>(arg.getOwner()->getParentOp());
+    if (func && !func.isDeclaration() &&
+        arg.getOwner() == &func.getBody().front()) {
+      attr = func.getArgAttrOfType<IntegerAttr>(arg.getArgNumber(),
+                                              "pto.alignment");
+    }
+  } else if (auto cast = pointer.getDefiningOp<CastPtrOp>()) {
+    if (isa<IntegerType>(cast.getInput().getType()) &&
+        isa<PtrType>(pointer.getType())) {
+      attr = cast->getAttrOfType<IntegerAttr>("pto.alignment");
+    }
+  }
+  if (!attr || !attr.getValue().isStrictlyPositive() ||
+      attr.getValue().getActiveBits() > 63 || !attr.getValue().isPowerOf2()) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(attr.getValue().getZExtValue());
+}
+
 // Fold an AddPtr into the remainder of its base by scaling the element offset
 // by the element size, using the gcd-reduced modulus for the offset query.
 static std::optional<int64_t>
@@ -242,6 +267,11 @@ getKnownPointerRemainder(Value pointer, int64_t alignmentBytes,
   }
   if (depth > kPointerTraceMaxDepth) {
     return std::nullopt;
+  }
+  if (auto alignment = getExplicitPointerAlignment(pointer)) {
+    if (*alignment % alignmentBytes == 0) {
+      return 0;
+    }
   }
   if (isa<BlockArgument>(pointer)) {
     return 0;
